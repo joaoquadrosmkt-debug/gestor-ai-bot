@@ -19,6 +19,16 @@ if (!botToken || !chatId || !utmifyMcpUrl || !geminiApiKey) {
 
 const bot = new TelegramBot(botToken, { polling: true });
 
+// ========== SERVIDOR HTTP PARA MANTER STATUS LIVE NO RENDER ==========
+const http = require('http');
+const port = process.env.PORT || 3000;
+http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+  res.end('🤖 Gestor AI Bot está rodando 24/7 com sucesso!\n');
+}).listen(port, () => {
+  console.log(`🌐 Servidor HTTP ativo na porta ${port}`);
+});
+
 // Registro de alterações passadas no dia para acompanhamento (em memória)
 // Formato: { [campaignId]: { lastChangeTimeStr: "09:01", timestamp: 123456, salesAtChange: 3, profitAtChange: 50.00, budgetCents: 6000 } }
 const historyLogs = {};
