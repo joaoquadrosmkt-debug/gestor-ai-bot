@@ -363,8 +363,8 @@ async function runCampaignCheck() {
       let emojiHeader = '🔴';
       if (item.tagAcao === '+50%') emojiHeader = '🟢';
 
-      const formattedBudgetAtual = Math.round(item.orcamentoAtualDolares);
-      const formattedBudgetNovo = Math.round(item.orcamentoNovoDolares);
+      const formattedBudgetAtual = item.orcamentoAtualDolares.toFixed(2);
+      const formattedBudgetNovo = item.orcamentoNovoDolares.toFixed(2);
 
       const message = `${emojiHeader} ${item.tagAcao}\n` +
         `Campanha: ${item.nome}\n` +
