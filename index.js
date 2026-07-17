@@ -413,7 +413,13 @@ bot.onText(/\/reset/, async (msg) => {
 
     for (const c of campaigns) {
       const roas = c.roas || 0;
+      const spendUSD = (c.spend || 0) / 100;
+      const sales = c.approvedOrdersCount || 0;
       let targetBudgetCents = c.dailyBudget || 1000;
+
+      // Regra de tolerância: não julgar se gastou muito pouco
+      if (sales === 0 && spendUSD < 8.00) continue;
+      if (sales > 0 && roas < 1.3 && spendUSD < 12.00) continue;
 
       if (roas > 1.8) targetBudgetCents = Math.min(targetBudgetCents, 3000);
       else if (roas >= 1.3) targetBudgetCents = 2000;
@@ -464,7 +470,13 @@ bot.onText(/\/resetontem/, async (msg) => {
 
     for (const c of campaigns) {
       const roas = c.roas || 0;
+      const spendUSD = (c.spend || 0) / 100;
+      const sales = c.approvedOrdersCount || 0;
       let targetBudgetCents = c.dailyBudget || 1000;
+
+      // Regra de tolerância: não julgar se gastou muito pouco
+      if (sales === 0 && spendUSD < 8.00) continue;
+      if (sales > 0 && roas < 1.3 && spendUSD < 12.00) continue;
 
       if (roas > 1.8) targetBudgetCents = Math.min(targetBudgetCents, 3000);
       else if (roas >= 1.3) targetBudgetCents = 2000;
@@ -632,7 +644,13 @@ cron.schedule('55 23 * * *', async () => {
 
     for (const c of campaigns) {
       const roas = c.roas || 0;
+      const spendUSD = (c.spend || 0) / 100;
+      const sales = c.approvedOrdersCount || 0;
       let targetBudgetCents = c.dailyBudget || 1000;
+
+      // Regra de tolerância: não julgar se gastou muito pouco
+      if (sales === 0 && spendUSD < 8.00) continue;
+      if (sales > 0 && roas < 1.3 && spendUSD < 12.00) continue;
 
       if (roas > 1.8) {
         targetBudgetCents = Math.min(targetBudgetCents, 3000); // Max $30
