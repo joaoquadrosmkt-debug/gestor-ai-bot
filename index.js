@@ -392,6 +392,72 @@ async function runCampaignCheck() {
   }
 }
 
+// ========== COMANDOS DO TELEGRAM ==========
+
+bot.onText(/\/resumo/, async (msg) => {
+  const chatIdMsg = msg.chat.id;
+  
+  // Apenas responder se for o dono do bot
+  if (chatIdMsg.toString() !== chatId.toString()) return;
+
+  await bot.sendMessage(chatIdMsg, "⏳ Buscando dados ao vivo da Utmify...");
+
+  const mcpClient = await connectUtmifyMcp();
+  if (!mcpClient) {
+    return bot.sendMessage(chatIdMsg, "❌ Erro ao conectar na Utmify.");
+  }
+
+  try {
+    const dashboardId = await getDashboardId(mcpClient);
+    if (!dashboardId) return bot.sendMessage(chatIdMsg, "❌ Erro ao buscar dashboard.");
+
+    const campaigns = await getCampaignData(mcpClient, dashboardId);
+    
+    if (campaigns.length === 0) {
+      return bot.sendMessage(chatIdMsg, "Nenhuma campanha rodando hoje.");
+    }
+
+    let totalSpend = 0;
+    let totalRevenue = 0;
+    let totalSales = 0;
+    
+    let summaryText = "📊 *RESUMO DAS CAMPANHAS HOJE*\n\n";
+
+    for (const c of campaigns) {
+      const spend = c.spend || 0;
+      const revenue = c.revenue || 0;
+      const profit = revenue - spend;
+      const roas = c.roas || 0;
+      const sales = c.purchases || 0;
+
+      totalSpend += spend;
+      totalRevenue += revenue;
+      totalSales += sales;
+
+      const emoji = profit >= 0 ? "🟢" : "🔴";
+      summaryText += `${emoji} *${c.name}*\n`;
+      summaryText += `Gasto: $${spend.toFixed(2)} | Fat: $${revenue.toFixed(2)}\n`;
+      summaryText += `Lucro: $${profit.toFixed(2)} | ROAS: ${roas.toFixed(2)}\n\n`;
+    }
+
+    const totalProfit = totalRevenue - totalSpend;
+    const totalRoas = totalSpend > 0 ? (totalRevenue / totalSpend) : 0;
+    const totalEmoji = totalProfit >= 0 ? "✅" : "⚠️";
+
+    summaryText += `🏆 *TOTAL GERAL*\n`;
+    summaryText += `Vendas Totais: ${totalSales}\n`;
+    summaryText += `Gasto Total: $${totalSpend.toFixed(2)}\n`;
+    summaryText += `Faturamento Total: $${totalRevenue.toFixed(2)}\n`;
+    summaryText += `${totalEmoji} *Lucro Total: $${totalProfit.toFixed(2)}*\n`;
+    summaryText += `📈 *ROAS Médio: ${totalRoas.toFixed(2)}*\n`;
+
+    await bot.sendMessage(chatIdMsg, summaryText, { parse_mode: 'Markdown' });
+
+  } finally {
+    try { await mcpClient.close(); } catch (e) { /* ignorar */ }
+  }
+});
+
 // ========== TELEGRAM CALLBACKS ==========
 
 bot.on('callback_query', async (callbackQuery) => {
