@@ -29,9 +29,26 @@ http.createServer((req, res) => {
   console.log(`🌐 Servidor HTTP ativo na porta ${port}`);
 });
 
-// Registro de alterações passadas no dia para acompanhamento (em memória)
-// Formato: { [campaignId]: { lastChangeTimeStr: "09:01", timestamp: 123456, salesAtChange: 3, profitAtChange: 50.00, budgetCents: 6000 } }
-const historyLogs = {};
+const fs = require('fs');
+
+// Registro de alterações passadas no dia para acompanhamento
+const HISTORY_FILE = './historyLogs.json';
+let historyLogs = {};
+try {
+  if (fs.existsSync(HISTORY_FILE)) {
+    historyLogs = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8'));
+  }
+} catch (e) {
+  console.error("Erro ao ler history", e);
+}
+
+function saveHistory() {
+  try {
+    fs.writeFileSync(HISTORY_FILE, JSON.stringify(historyLogs, null, 2));
+  } catch (e) {
+    console.error("Erro ao salvar history", e);
+  }
+}
 
 // Helper para formatar horário em Brasília (HH:MM)
 function formatTimeSP(date = new Date()) {
@@ -242,47 +259,61 @@ function evaluateLocalRules(campaignsData, hourlyHistory = { profitByHour: {}, s
     const isWeakHistoricalHour = histProfitCents < 0; // Ex: 06h, 07h, 09h, 10h
     const isPeakHistoricalHour = histProfitCents > 0; // Horário que dá lucro na média dos 7 dias é considerado pico
 
-    // 1 e 2: Escala (Aumentar 50%) -> Mínimo 3 vendas e ROAS >= 1.8 (Permitido somente até as 19:00)
-    if (approvedSales >= 3 && roas >= 1.8) {
-      if (nowSPHour >= 19) {
-        console.log(`ℹ️ Campanha "${c.name}" elegível para escala, porém suspensa por trava noturna (após 19:00).`);
-      } else {
-        const peakExtraText = isPeakHistoricalHour ? " (janela de pico)" : "";
-        if (history) {
-          const newSales = approvedSales - (history.salesAtChange || 0);
-          const newProfit = profitUSD - (history.profitAtChange || 0);
-          if (newSales >= 3) {
+    // Regra Pós-Escala: Se o bot aumentou o orçamento nas últimas horas, verificar se a performance despencou
+    let handledPostScale = false;
+    if (history && history.action === 'Aumentar' && hoursSince >= 2) {
+      const newProfit = profitUSD - (history.profitAtChange || 0);
+      if (roas < 1.3 || (newProfit < 0 && spendUSD >= 10.00)) {
+        acaoSugerida = "Reduzir 30%";
+        tagAcao = "-30%";
+        newBudgetCents = Math.round(currentBudgetCents * 0.7);
+        motivo = `Alerta pós-escala: o ROAS ou lucro caiu nas últimas ${hoursSince.toFixed(1)}h após a mudança do orçamento (Lucro novo: $${newProfit.toFixed(2)}).`;
+        handledPostScale = true;
+      }
+    }
+
+    if (!handledPostScale) {
+      // 1 e 2: Escala (Aumentar 50%) -> Mínimo 3 vendas e ROAS >= 1.8 (Permitido somente até as 19:00)
+      if (approvedSales >= 3 && roas >= 1.8) {
+        if (nowSPHour >= 19) {
+          console.log(`ℹ️ Campanha "${c.name}" elegível para escala, porém suspensa por trava noturna (após 19:00).`);
+        } else {
+          const peakExtraText = isPeakHistoricalHour ? " (janela de pico)" : "";
+          if (history) {
+            const newSales = approvedSales - (history.salesAtChange || 0);
+            const newProfit = profitUSD - (history.profitAtChange || 0);
+            if (newSales >= 3) {
+              acaoSugerida = "Aumentar 50%";
+              tagAcao = "+50%";
+              newBudgetCents = Math.round(currentBudgetCents * 1.5);
+              motivo = `escala consecutiva${peakExtraText}: aumento sugerido pois desde a ultima atualização às ${history.lastChangeTimeStr} teve ${newSales} vendas novas e lucro de $${newProfit.toFixed(2)}`;
+            }
+          } else {
             acaoSugerida = "Aumentar 50%";
             tagAcao = "+50%";
             newBudgetCents = Math.round(currentBudgetCents * 1.5);
-            motivo = `escala consecutiva${peakExtraText}: aumento sugerido pois desde a ultima atualização às ${history.lastChangeTimeStr} teve ${newSales} vendas novas e lucro de $${newProfit.toFixed(2)}`;
+            motivo = `escala inicial${peakExtraText}: +${approvedSales} vendas e +$${profitUSD.toFixed(2)} de lucro hoje`;
           }
-        } else {
-          acaoSugerida = "Aumentar 50%";
-          tagAcao = "+50%";
-          newBudgetCents = Math.round(currentBudgetCents * 1.5);
-          motivo = `escala inicial${peakExtraText}: +${approvedSales} vendas e +$${profitUSD.toFixed(2)} de lucro hoje`;
         }
       }
-    }
-    // 3: Stop Loss (Reduzir 50%) -> Gasto >= $8.00 e 0 Vendas
-    else if (spendUSD >= 8.00 && approvedSales === 0) {
-      // Filtro de Tolerância: Se for um horário de prejuízo recorrente histórico (ex: 09h-10h) e o gasto estiver < $12.00, tolera 1 ciclo
-      if (isWeakHistoricalHour && spendUSD < 12.00) {
-        console.log(`🛡️ Tolerância de Horário Histórico: Campanha "${c.name}" gastou $${spendUSD.toFixed(2)} às ${nowSPHour}:00h (horário historicamente fraco), aguardando recuperação no pico.`);
-      } else {
-        acaoSugerida = "Reduzir 50%";
-        tagAcao = "-50%";
-        newBudgetCents = Math.round(currentBudgetCents * 0.5);
-        motivo = `stop loss: $${spendUSD.toFixed(2)} gastos sem nenhuma venda hoje`;
+      // 3: Stop Loss (Reduzir 50%) -> Gasto >= $8.00 e 0 Vendas
+      else if (spendUSD >= 8.00 && approvedSales === 0) {
+        if (isWeakHistoricalHour && spendUSD < 12.00) {
+          console.log(`🛡️ Tolerância de Horário Histórico: Campanha "${c.name}" gastou $${spendUSD.toFixed(2)} às ${nowSPHour}:00h (horário historicamente fraco), aguardando recuperação no pico.`);
+        } else {
+          acaoSugerida = "Reduzir 50%";
+          tagAcao = "-50%";
+          newBudgetCents = Math.round(currentBudgetCents * 0.5);
+          motivo = `stop loss: $${spendUSD.toFixed(2)} gastos sem nenhuma venda hoje`;
+        }
       }
-    }
-    // 4: Ajuste ROAS Baixo (Reduzir 30%) -> Tem vendas, ROAS < 1.3 e Gasto >= $12.00
-    else if (approvedSales >= 1 && roas < 1.3 && spendUSD >= 12.00) {
-      acaoSugerida = "Reduzir 30%";
-      tagAcao = "-30%";
-      newBudgetCents = Math.round(currentBudgetCents * 0.7);
-      motivo = `roas baixo: ${approvedSales} venda(s), Faturamento $${revenueUSD.toFixed(2)}, ROAS ${roas.toFixed(2)} < 1.3 e gasto de $${spendUSD.toFixed(2)}`;
+      // 4: Ajuste ROAS Baixo (Reduzir 30%) -> Tem vendas, ROAS < 1.3 e Gasto >= $12.00
+      else if (approvedSales >= 1 && roas < 1.3 && spendUSD >= 12.00) {
+        acaoSugerida = "Reduzir 30%";
+        tagAcao = "-30%";
+        newBudgetCents = Math.round(currentBudgetCents * 0.7);
+        motivo = `roas baixo: ${approvedSales} venda(s), Faturamento $${revenueUSD.toFixed(2)}, ROAS ${roas.toFixed(2)} < 1.3 e gasto de $${spendUSD.toFixed(2)}`;
+      }
     }
 
     if (acaoSugerida !== "Manter") {
@@ -389,66 +420,35 @@ async function runCampaignCheck(isManual = false) {
       return;
     }
 
-    // PASSO 5: Enviar sugestões ou aplicar automaticamente
+    // PASSO 5: Enviar sugestões para TODAS as ações
     for (const item of analysis.campanhas) {
       if (item.acaoSugerida === 'Manter') continue;
 
       const formattedBudgetAtual = item.orcamentoAtualDolares.toFixed(2);
       const formattedBudgetNovo = item.orcamentoNovoDolares.toFixed(2);
+      const isScale = item.acaoSugerida.includes('Aumentar');
+      const actionTag = isScale ? 'Aumentar' : 'Reduzir';
 
-      // Se for escala (Aumentar), pede aprovação manual
-      if (item.acaoSugerida.includes('Aumentar')) {
-        const message = `🟢 ${item.tagAcao}\n` +
-          `Campanha: ${item.nome}\n` +
-          `Gasto: $${item.spendUSD.toFixed(2)}\n` +
-          `Lucro: $${item.profitUSD.toFixed(2)}\n` +
-          `ROAS: ${item.roas.toFixed(2)}\n` +
-          `Última alteração: ${item.lastChangeStr}\n` +
-          `Ação sugerida: ${item.acaoSugerida}: $${formattedBudgetAtual} → $${formattedBudgetNovo}\n` +
-          `Motivo: ${item.motivo}`;
+      const message = `${isScale ? '🟢' : '🔴'} ${item.tagAcao}\n` +
+        `Campanha: ${item.nome}\n` +
+        `Gasto: $${item.spendUSD.toFixed(2)}\n` +
+        `Lucro: $${item.profitUSD.toFixed(2)}\n` +
+        `ROAS: ${item.roas.toFixed(2)}\n` +
+        `Última alteração: ${item.lastChangeStr}\n` +
+        `Ação sugerida: ${item.acaoSugerida}: $${formattedBudgetAtual} → $${formattedBudgetNovo}\n` +
+        `Motivo: ${item.motivo}`;
 
-        const opts = {
-          reply_markup: {
-            inline_keyboard: [[
-              { text: '✅ Aprovar', callback_data: `approve_${item.id}_${item.orcamentoNovoCentavos}_${item.approvedSales}_${item.profitUSD.toFixed(2)}` },
-              { text: '❌ Não', callback_data: `reject_${item.id}` }
-            ]]
-          }
-        };
-
-        await bot.sendMessage(chatId, message, opts);
-        console.log(`📨 Sugestão de escala enviada para aprovação: "${item.nome}"`);
-      } 
-      // Se for redução (Stop Loss), aplica no automático
-      else {
-        const success = await updateCampaignBudget(item.id, item.orcamentoNovoCentavos);
-        
-        let message = `🔴 ${item.tagAcao} (Automático)\n` +
-          `Campanha: ${item.nome}\n` +
-          `Gasto: $${item.spendUSD.toFixed(2)}\n` +
-          `Lucro: $${item.profitUSD.toFixed(2)}\n` +
-          `ROAS: ${item.roas.toFixed(2)}\n` +
-          `Última alteração: ${item.lastChangeStr}\n` +
-          `Ação aplicada: ${item.acaoSugerida}: $${formattedBudgetAtual} → $${formattedBudgetNovo}\n` +
-          `Motivo: ${item.motivo}\n\n`;
-
-        if (success) {
-          // Grava no histórico para ativar o cooldown de 2 horas
-          historyLogs[item.id] = {
-            lastChangeTimeStr: formatTimeSP(),
-            timestamp: Date.now(),
-            salesAtChange: item.approvedSales,
-            profitAtChange: item.profitUSD,
-            budgetCents: item.orcamentoNovoCentavos
-          };
-          message += `✅ *ORÇAMENTO REDUZIDO COM SUCESSO!*`;
-        } else {
-          message += `❌ *FALHA AO REDUZIR NA API DO FACEBOOK.*`;
+      const opts = {
+        reply_markup: {
+          inline_keyboard: [[
+            { text: '✅ Aprovar', callback_data: `approve_${item.id}_${item.orcamentoNovoCentavos}_${item.approvedSales}_${item.profitUSD.toFixed(2)}_${actionTag}` },
+            { text: '❌ Não', callback_data: `reject_${item.id}` }
+          ]]
         }
-        
-        await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
-        console.log(`🤖 Redução automática aplicada na campanha "${item.nome}"`);
-      }
+      };
+
+      await bot.sendMessage(chatId, message, opts);
+      console.log(`📨 Sugestão de ação enviada para aprovação: "${item.nome}"`);
     }
   } finally {
     try { await mcpClient.close(); } catch (e) { /* ignorar */ }
@@ -712,6 +712,7 @@ bot.on('callback_query', async (callbackQuery) => {
     const newBudgetCents = parseInt(parts[2]);
     const sales = parseInt(parts[3] || '0');
     const profit = parseFloat(parts[4] || '0');
+    const actionTag = parts[5] || 'Aumentar';
 
     await bot.answerCallbackQuery(callbackQuery.id, { text: "Alterando orçamento no Facebook Ads..." });
 
@@ -723,8 +724,10 @@ bot.on('callback_query', async (callbackQuery) => {
         timestamp: Date.now(),
         salesAtChange: sales,
         profitAtChange: profit,
-        budgetCents: newBudgetCents
+        budgetCents: newBudgetCents,
+        action: actionTag
       };
+      saveHistory();
 
       await bot.editMessageText(
         `${message.text}\n\n✅ *Aprovado e aplicado no Meta Ads!*`,
@@ -819,6 +822,36 @@ cron.schedule('55 23 * * *', async () => {
     } else {
       msg = `🛡️ *Proteção Noturna:* Nenhuma campanha precisou de reajuste.`;
     }
+
+    // Calcular fechamento do caixa
+    let totalSpendUSD = 0;
+    let totalRevenueUSD = 0;
+    let bestCampaign = { name: 'Nenhuma', roas: 0, profit: 0 };
+
+    for (const c of campaignsToday) {
+      const spend = (c.spend || 0) / 100;
+      const rev = (c.revenue || 0) / 100;
+      const profit = rev - spend;
+      const roasToday = spend > 0 ? rev / spend : 0;
+      
+      totalSpendUSD += spend;
+      totalRevenueUSD += rev;
+
+      if (profit > bestCampaign.profit) {
+        bestCampaign = { name: c.name, roas: roasToday, profit: profit };
+      }
+    }
+    const totalProfitUSD = totalRevenueUSD - totalSpendUSD;
+    const globalRoas = totalSpendUSD > 0 ? totalRevenueUSD / totalSpendUSD : 0;
+
+    const recapMsg = `\n\n📊 *FECHAMENTO DE CAIXA (HOJE)*\n` +
+      `Investimento: $${totalSpendUSD.toFixed(2)}\n` +
+      `Faturamento: $${totalRevenueUSD.toFixed(2)}\n` +
+      `Lucro Líquido: $${totalProfitUSD.toFixed(2)}\n` +
+      `ROAS Global: ${globalRoas.toFixed(2)}\n` +
+      `🏆 Melhor campanha: ${bestCampaign.name} (Lucro: $${bestCampaign.profit.toFixed(2)}, ROAS: ${bestCampaign.roas.toFixed(2)})`;
+
+    msg += recapMsg;
 
     await bot.sendMessage(chatId, msg, { parse_mode: 'Markdown' });
   } finally {
