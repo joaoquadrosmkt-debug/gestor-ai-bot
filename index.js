@@ -534,13 +534,26 @@ bot.onText(/\/resumo/, async (msg) => {
     });
 
     let totalSpend = 0;
-    let totalRevenue = 0;
-    let totalSales = 0;
+    let sumCampaignsRevenue = 0;
+    let sumCampaignsSales = 0;
+
+    for (const c of campaigns) {
+      totalSpend += (c.spend || 0) / 100;
+      sumCampaignsRevenue += (c.revenue || 0) / 100;
+      sumCampaignsSales += (c.approvedOrdersCount || 0);
+    }
+
+    let totalRevenue = sumCampaignsRevenue;
+    let totalSales = sumCampaignsSales;
 
     if (summaryRes) {
-       totalSpend = (summaryRes.spend || 0) / 100;
-       totalRevenue = (summaryRes.revenue || 0) / 100;
-       totalSales = (summaryRes.ordersCount && summaryRes.ordersCount.total) ? summaryRes.ordersCount.total : 0;
+       // Puxamos faturamento e vendas da Utmify (para incluir as não rastreadas)
+       const dashRevenue = (summaryRes.revenue || 0) / 100;
+       const dashSales = (summaryRes.ordersCount && summaryRes.ordersCount.total) ? summaryRes.ordersCount.total : 0;
+       
+       // Só substitui se o dashboard tiver um valor maior (para garantir que não zere caso a Utmify atrase)
+       if (dashRevenue >= sumCampaignsRevenue) totalRevenue = dashRevenue;
+       if (dashSales >= sumCampaignsSales) totalSales = dashSales;
     }
     
     if (campaigns.length === 0 && totalSales === 0) {
@@ -569,9 +582,13 @@ bot.onText(/\/resumo/, async (msg) => {
     const totalProfit = totalRevenue - totalSpend;
     const totalRoas = totalSpend > 0 ? (totalRevenue / totalSpend) : 0;
     const totalEmoji = totalProfit >= 0 ? "✅" : "⚠️";
+    const untrackedSales = totalSales - sumCampaignsSales;
 
     summaryText += `🏆 *TOTAL GERAL*\n`;
     summaryText += `Vendas Totais: ${totalSales}\n`;
+    if (untrackedSales > 0) {
+      summaryText += `👻 Vendas Não Rastreadas: ${untrackedSales}\n`;
+    }
     summaryText += `Gasto Total: $${totalSpend.toFixed(2)}\n`;
     summaryText += `Faturamento Total: $${totalRevenue.toFixed(2)}\n`;
     summaryText += `${totalEmoji} *Lucro Total: $${totalProfit.toFixed(2)}*\n`;
