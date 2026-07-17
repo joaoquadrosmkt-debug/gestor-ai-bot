@@ -394,6 +394,56 @@ async function runCampaignCheck() {
 
 // ========== COMANDOS DO TELEGRAM ==========
 
+bot.onText(/\/reset/, async (msg) => {
+  const chatIdMsg = msg.chat.id;
+  if (chatIdMsg.toString() !== chatId.toString()) return;
+
+  await bot.sendMessage(chatIdMsg, "⏳ Forçando Proteção Noturna manualmente...");
+  
+  const mcpClient = await connectUtmifyMcp();
+  if (!mcpClient) return;
+
+  try {
+    const dashboardId = await getDashboardId(mcpClient);
+    if (!dashboardId) return;
+
+    const campaigns = await getCampaignData(mcpClient, dashboardId);
+    const report = [];
+    let errorCount = 0;
+
+    for (const c of campaigns) {
+      const roas = c.roas || 0;
+      let targetBudgetCents = c.dailyBudget || 1000;
+
+      if (roas > 1.8) targetBudgetCents = Math.min(targetBudgetCents, 3000);
+      else if (roas >= 1.3) targetBudgetCents = 2000;
+      else targetBudgetCents = 1000;
+
+      if (targetBudgetCents !== c.dailyBudget) {
+        const success = await updateCampaignBudget(c.id, targetBudgetCents);
+        if (success) {
+          report.push(`🔄 *${c.name}* → $${(targetBudgetCents / 100).toFixed(2)} (ROAS: ${roas.toFixed(2)})`);
+        } else {
+          errorCount++;
+          report.push(`❌ *FALHOU:* ${c.name} (Erro na API do Facebook)`);
+        }
+      }
+    }
+
+    let msgRet = "";
+    if (report.length > 0) {
+      msgRet = `🛡️ *Proteção Noturna MANUAL*\n\n${report.join('\n')}`;
+      if (errorCount > 0) msgRet += `\n\n⚠️ Tivemos ${errorCount} erro(s) de permissão com o Facebook. Verifique o Token!`;
+    } else {
+      msgRet = `🛡️ *Proteção Noturna MANUAL:* Nenhuma campanha precisou de reajuste.`;
+    }
+
+    await bot.sendMessage(chatIdMsg, msgRet, { parse_mode: 'Markdown' });
+  } finally {
+    try { await mcpClient.close(); } catch (e) { /* ignorar */ }
+  }
+});
+
 bot.onText(/\/resumo/, async (msg) => {
   const chatIdMsg = msg.chat.id;
   
@@ -413,31 +463,44 @@ bot.onText(/\/resumo/, async (msg) => {
 
     const campaigns = await getCampaignData(mcpClient, dashboardId);
     
-    if (campaigns.length === 0) {
-      return bot.sendMessage(chatIdMsg, "Nenhuma campanha rodando hoje.");
-    }
+    // Buscar Totais Globais (inclusive vendas não rastreadas)
+    const dateRangeToday = getBrasiliaDateRange();
+    const summaryRes = await callMcpTool(mcpClient, 'get_dashboard_summary', {
+      dashboardId: dashboardId,
+      dateRange: dateRangeToday
+    });
 
     let totalSpend = 0;
     let totalRevenue = 0;
     let totalSales = 0;
+
+    if (summaryRes) {
+       totalSpend = (summaryRes.spend || 0) / 100;
+       totalRevenue = (summaryRes.revenue || 0) / 100;
+       totalSales = (summaryRes.ordersCount && summaryRes.ordersCount.total) ? summaryRes.ordersCount.total : 0;
+    }
     
+    if (campaigns.length === 0 && totalSales === 0) {
+      return bot.sendMessage(chatIdMsg, "Nenhum dado rodando hoje.");
+    }
+
     let summaryText = "📊 *RESUMO DAS CAMPANHAS HOJE*\n\n";
 
-    for (const c of campaigns) {
-      const spend = (c.spend || 0) / 100;
-      const revenue = (c.revenue || 0) / 100;
-      const profit = revenue - spend;
-      const roas = c.roas || (spend > 0 ? revenue / spend : 0);
-      const sales = c.approvedOrdersCount || 0;
+    if (campaigns.length > 0) {
+      for (const c of campaigns) {
+        const spend = (c.spend || 0) / 100;
+        const revenue = (c.revenue || 0) / 100;
+        const profit = revenue - spend;
+        const roas = c.roas || (spend > 0 ? revenue / spend : 0);
+        const sales = c.approvedOrdersCount || 0;
 
-      totalSpend += spend;
-      totalRevenue += revenue;
-      totalSales += sales;
-
-      const emoji = profit >= 0 ? "🟢" : "🔴";
-      summaryText += `${emoji} *${c.name}*\n`;
-      summaryText += `Gasto: $${spend.toFixed(2)} | Fat: $${revenue.toFixed(2)}\n`;
-      summaryText += `Lucro: $${profit.toFixed(2)} | ROAS: ${roas.toFixed(2)}\n\n`;
+        const emoji = profit >= 0 ? "🟢" : "🔴";
+        summaryText += `${emoji} *${c.name}*\n`;
+        summaryText += `Gasto: $${spend.toFixed(2)} | Fat: $${revenue.toFixed(2)}\n`;
+        summaryText += `Lucro: $${profit.toFixed(2)} | ROAS: ${roas.toFixed(2)}\n\n`;
+      }
+    } else {
+      summaryText += "_Nenhuma campanha ativa._\n\n";
     }
 
     const totalProfit = totalRevenue - totalSpend;
@@ -514,6 +577,7 @@ cron.schedule('55 23 * * *', async () => {
 
     const campaigns = await getCampaignData(mcpClient, dashboardId);
     const report = [];
+    let errorCount = 0;
 
     for (const c of campaigns) {
       const roas = c.roas || 0;
@@ -531,13 +595,22 @@ cron.schedule('55 23 * * *', async () => {
         const success = await updateCampaignBudget(c.id, targetBudgetCents);
         if (success) {
           report.push(`🔄 *${c.name}* → $${(targetBudgetCents / 100).toFixed(2)} (ROAS: ${roas.toFixed(2)})`);
+        } else {
+          errorCount++;
+          report.push(`❌ *FALHOU:* ${c.name} (Erro na API do Facebook)`);
         }
       }
     }
 
-    const msg = report.length > 0
-      ? `🛡️ *Proteção Noturna (23:55)*\n\n${report.join('\n')}`
-      : `🛡️ *Proteção Noturna:* Nenhuma campanha precisou de reajuste.`;
+    let msg = "";
+    if (report.length > 0) {
+      msg = `🛡️ *Proteção Noturna (23:55)*\n\n${report.join('\n')}`;
+      if (errorCount > 0) {
+        msg += `\n\n⚠️ Tivemos ${errorCount} erro(s) de permissão com o Facebook. Verifique o Token!`;
+      }
+    } else {
+      msg = `🛡️ *Proteção Noturna:* Nenhuma campanha precisou de reajuste.`;
+    }
 
     await bot.sendMessage(chatId, msg, { parse_mode: 'Markdown' });
   } finally {
