@@ -785,6 +785,13 @@ cron.schedule('55 23 * * *', async () => {
       const roas2Days = roas2DaysMap[c.id] !== undefined ? roas2DaysMap[c.id] : roasToday;
       let targetBudgetCents = c.dailyBudget || 1000;
 
+      // === SOLUÇÃO MANUAL: TAG [HOLD] ===
+      // Se a campanha tiver [HOLD] ou [IGNORAR] no nome, o bot pula ela completamente
+      if (c.name.toUpperCase().includes('[HOLD]') || c.name.toUpperCase().includes('[IGNORAR]')) {
+        report.push(`✋ *${c.name}* → IGNORADA (Tag [HOLD] detectada)`);
+        continue;
+      }
+
       // Se a campanha esteve com ROAS < 1.3 na janela dos últimos 2 dias somados, PAUSA ELA
       if (roas2Days < 1.3 && spendUSD >= 5.00) {
         const success = await updateCampaignStatus(c.id, 'PAUSED');
@@ -801,9 +808,12 @@ cron.schedule('55 23 * * *', async () => {
       if (sales === 0 && spendUSD < 8.00) continue;
       if (sales > 0 && roasToday < 1.3 && spendUSD < 12.00) continue;
 
-      if (roasToday > 1.8) {
+      // === SOLUÇÃO AUTOMÁTICA: ROAS 2 DIAS ===
+      // Protege a campanha de cair o orçamento se a média dos últimos 2 dias estiver excelente, 
+      // mesmo que hoje (roasToday) tenha sido um dia instável/ruim.
+      if (roasToday > 1.8 || roas2Days > 1.8) {
         targetBudgetCents = Math.min(targetBudgetCents, 3000); // Max $30
-      } else if (roasToday >= 1.3) {
+      } else if (roasToday >= 1.3 || roas2Days >= 1.3) {
         targetBudgetCents = 2000; // $20
       } else {
         targetBudgetCents = 1000; // $10
