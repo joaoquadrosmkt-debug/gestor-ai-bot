@@ -117,20 +117,25 @@ async function getDashboardId(client) {
   return dashboard.id;
 }
 
-function getBrasiliaDateRange(offsetDays = 0) {
-  const now = new Date(new Date().getTime() + offsetDays * 24 * 60 * 60 * 1000);
-  const spDateStr = now.toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" });
+function getBrasiliaDateRange(fromOffsetDays = 0, toOffsetDays = undefined) {
+  if (toOffsetDays === undefined) toOffsetDays = fromOffsetDays;
   
-  const fromISO = `${spDateStr}T03:00:00.000Z`;
-  const tomorrow = new Date(new Date(`${spDateStr}T00:00:00-03:00`).getTime() + 24 * 60 * 60 * 1000);
+  const fromDate = new Date(new Date().getTime() + fromOffsetDays * 24 * 60 * 60 * 1000);
+  const toDate = new Date(new Date().getTime() + toOffsetDays * 24 * 60 * 60 * 1000);
+
+  const spFromDateStr = fromDate.toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" });
+  const spToDateStr = toDate.toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" });
+  
+  const fromISO = `${spFromDateStr}T03:00:00.000Z`;
+  const tomorrow = new Date(new Date(`${spToDateStr}T00:00:00-03:00`).getTime() + 24 * 60 * 60 * 1000);
   const tomStr = tomorrow.toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" });
   const toISO = `${tomStr}T02:59:59.999Z`;
 
   return { from: fromISO, to: toISO };
 }
 
-async function getCampaignData(client, dashboardId, offsetDays = 0) {
-  const dateRange = getBrasiliaDateRange(offsetDays);
+async function getCampaignData(client, dashboardId, fromOffsetDays = 0, toOffsetDays = undefined) {
+  const dateRange = getBrasiliaDateRange(fromOffsetDays, toOffsetDays);
   console.log(`🔍 Buscando dados Meta Ads (${dateRange.from} até ${dateRange.to})...`);
 
   const data = await callMcpTool(client, 'get_meta_ad_objects', {
@@ -182,6 +187,24 @@ async function updateCampaignBudget(campaignId, newBudgetCents) {
   }
 }
 
+async function updateCampaignStatus(campaignId, statusStr) {
+  if (!facebookAccessToken || facebookAccessToken === 'seu_token_do_facebook_aqui') {
+    console.log(`⚠️ Facebook Token não configurado. Simulando status ${statusStr} na campanha ${campaignId}`);
+    return true;
+  }
+  try {
+    const url = `https://graph.facebook.com/v19.0/${campaignId}`;
+    await axios.post(url, {
+      status: statusStr,
+      access_token: facebookAccessToken
+    });
+    return true;
+  } catch (error) {
+    console.error(`Erro Facebook API (status ${campaignId}):`, error.response ? error.response.data : error.message);
+    return false;
+  }
+}
+
 // ========== ENGINE LOCAL DE REGRAS DE TRÁFEGO ==========
 
 function evaluateLocalRules(campaignsData, hourlyHistory = { profitByHour: {}, salesByHour: {} }) {
@@ -203,29 +226,36 @@ function evaluateLocalRules(campaignsData, hourlyHistory = { profitByHour: {}, s
     let motivo = "";
 
     const history = historyLogs[c.id];
+    if (history) {
+      const hoursSince = (Date.now() - history.timestamp) / (1000 * 60 * 60);
+      if (hoursSince < 2) {
+        console.log(`⏳ Campanha "${c.name}" ignorada (em período de respiro. Alterada há ${hoursSince.toFixed(1)}h).`);
+        continue;
+      }
+    }
+
     const lastChangeStr = history ? history.lastChangeTimeStr : "Nenhuma hoje";
     const nowSPHour = parseInt(new Date().toLocaleTimeString("en-US", { timeZone: "America/Sao_Paulo", hour: "2-digit", hour12: false }));
     
-    // Lucro histórico de 5 dias para a hora atual
+    // Lucro histórico de 7 dias para a hora atual
     const histProfitCents = hourlyHistory.profitByHour[nowSPHour] || 0;
     const isWeakHistoricalHour = histProfitCents < 0; // Ex: 06h, 07h, 09h, 10h
-    const isPeakHistoricalHour = nowSPHour >= 12 && nowSPHour <= 15; // 12h às 15h
+    const isPeakHistoricalHour = histProfitCents > 0; // Horário que dá lucro na média dos 7 dias é considerado pico
 
     // 1 e 2: Escala (Aumentar 50%) -> Mínimo 3 vendas e ROAS >= 1.8 (Permitido somente até as 19:00)
     if (approvedSales >= 3 && roas >= 1.8) {
       if (nowSPHour >= 19) {
         console.log(`ℹ️ Campanha "${c.name}" elegível para escala, porém suspensa por trava noturna (após 19:00).`);
       } else {
-        const now = Date.now();
         const peakExtraText = isPeakHistoricalHour ? " (janela de pico)" : "";
-        if (history && (now - history.timestamp < 2 * 60 * 60 * 1000)) {
+        if (history) {
           const newSales = approvedSales - (history.salesAtChange || 0);
           const newProfit = profitUSD - (history.profitAtChange || 0);
           if (newSales >= 3) {
             acaoSugerida = "Aumentar 50%";
             tagAcao = "+50%";
             newBudgetCents = Math.round(currentBudgetCents * 1.5);
-            motivo = `escala${peakExtraText}: +${newSales} vendas e +$${newProfit.toFixed(2)} de lucro desde o aumento das ${history.lastChangeTimeStr}`;
+            motivo = `escala consecutiva${peakExtraText}: aumento sugerido pois desde a ultima atualização às ${history.lastChangeTimeStr} teve ${newSales} vendas novas e lucro de $${newProfit.toFixed(2)}`;
           }
         } else {
           acaoSugerida = "Aumentar 50%";
@@ -300,11 +330,11 @@ async function getGeminiAnalysis(campaignsData) {
 
 // ========== PROCESSAMENTO PRINCIPAL ==========
 
-async function runCampaignCheck() {
+async function runCampaignCheck(isManual = false) {
   const now = new Date();
   const hour = now.getHours();
 
-  if (hour >= 23 || hour < 8) {
+  if (!isManual && (hour >= 23 || hour < 8)) {
     console.log("😴 Modo silencioso (madrugada). Sem envios.");
     return;
   }
@@ -324,15 +354,15 @@ async function runCampaignCheck() {
       return;
     }
 
-    // PASSO 4: Buscar histórico de 5 dias de lucro por hora para tolerância inteligente
+    // PASSO 4: Buscar histórico de 7 dias de lucro por hora para tolerância inteligente
     const today = new Date();
     const todayStr = today.toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" });
-    const fiveDaysAgo = new Date(today.getTime() - 5 * 24 * 60 * 60 * 1000);
-    const fiveDaysStr = fiveDaysAgo.toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" });
+    const sevenDaysAgo = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const sevenDaysStr = sevenDaysAgo.toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" });
 
     const summaryRes = await callMcpTool(mcpClient, 'get_dashboard_summary', {
       dashboardId: dashboardId,
-      dateRange: { from: `${fiveDaysStr}T03:00:00.000Z`, to: `${todayStr}T02:59:59.999Z` }
+      dateRange: { from: `${sevenDaysStr}T03:00:00.000Z`, to: `${todayStr}T02:59:59.999Z` }
     });
 
     const hourlyHistory = { profitByHour: {}, salesByHour: {} };
@@ -353,39 +383,72 @@ async function runCampaignCheck() {
 
     if (!analysis.campanhas || analysis.campanhas.length === 0) {
       console.log("✅ Nenhuma campanha precisa de alteração de orçamento no momento.");
+      if (isManual) {
+        await bot.sendMessage(chatId, "✅ Tudo tranquilo! Nenhuma campanha precisa de alteração de orçamento no momento.");
+      }
       return;
     }
 
-    // PASSO 5: Enviar sugestões via Telegram exatamente no layout solicitado pelo usuário
+    // PASSO 5: Enviar sugestões ou aplicar automaticamente
     for (const item of analysis.campanhas) {
       if (item.acaoSugerida === 'Manter') continue;
-
-      let emojiHeader = '🔴';
-      if (item.tagAcao === '+50%') emojiHeader = '🟢';
 
       const formattedBudgetAtual = item.orcamentoAtualDolares.toFixed(2);
       const formattedBudgetNovo = item.orcamentoNovoDolares.toFixed(2);
 
-      const message = `${emojiHeader} ${item.tagAcao}\n` +
-        `Campanha: ${item.nome}\n` +
-        `Gasto: $${item.spendUSD.toFixed(2)}\n` +
-        `Lucro: $${item.profitUSD.toFixed(2)}\n` +
-        `ROAS: ${item.roas.toFixed(2)}\n` +
-        `Última alteração: ${item.lastChangeStr}\n` +
-        `Ação sugerida: ${item.acaoSugerida}: $${formattedBudgetAtual} → $${formattedBudgetNovo}\n` +
-        `Motivo: ${item.motivo}`;
+      // Se for escala (Aumentar), pede aprovação manual
+      if (item.acaoSugerida.includes('Aumentar')) {
+        const message = `🟢 ${item.tagAcao}\n` +
+          `Campanha: ${item.nome}\n` +
+          `Gasto: $${item.spendUSD.toFixed(2)}\n` +
+          `Lucro: $${item.profitUSD.toFixed(2)}\n` +
+          `ROAS: ${item.roas.toFixed(2)}\n` +
+          `Última alteração: ${item.lastChangeStr}\n` +
+          `Ação sugerida: ${item.acaoSugerida}: $${formattedBudgetAtual} → $${formattedBudgetNovo}\n` +
+          `Motivo: ${item.motivo}`;
 
-      const opts = {
-        reply_markup: {
-          inline_keyboard: [[
-            { text: '✅ Aprovar', callback_data: `approve_${item.id}_${item.orcamentoNovoCentavos}_${item.approvedSales}_${item.profitUSD.toFixed(2)}` },
-            { text: '❌ Não', callback_data: `reject_${item.id}` }
-          ]]
+        const opts = {
+          reply_markup: {
+            inline_keyboard: [[
+              { text: '✅ Aprovar', callback_data: `approve_${item.id}_${item.orcamentoNovoCentavos}_${item.approvedSales}_${item.profitUSD.toFixed(2)}` },
+              { text: '❌ Não', callback_data: `reject_${item.id}` }
+            ]]
+          }
+        };
+
+        await bot.sendMessage(chatId, message, opts);
+        console.log(`📨 Sugestão de escala enviada para aprovação: "${item.nome}"`);
+      } 
+      // Se for redução (Stop Loss), aplica no automático
+      else {
+        const success = await updateCampaignBudget(item.id, item.orcamentoNovoCentavos);
+        
+        let message = `🔴 ${item.tagAcao} (Automático)\n` +
+          `Campanha: ${item.nome}\n` +
+          `Gasto: $${item.spendUSD.toFixed(2)}\n` +
+          `Lucro: $${item.profitUSD.toFixed(2)}\n` +
+          `ROAS: ${item.roas.toFixed(2)}\n` +
+          `Última alteração: ${item.lastChangeStr}\n` +
+          `Ação aplicada: ${item.acaoSugerida}: $${formattedBudgetAtual} → $${formattedBudgetNovo}\n` +
+          `Motivo: ${item.motivo}\n\n`;
+
+        if (success) {
+          // Grava no histórico para ativar o cooldown de 2 horas
+          historyLogs[item.id] = {
+            lastChangeTimeStr: formatTimeSP(),
+            timestamp: Date.now(),
+            salesAtChange: item.approvedSales,
+            profitAtChange: item.profitUSD,
+            budgetCents: item.orcamentoNovoCentavos
+          };
+          message += `✅ *ORÇAMENTO REDUZIDO COM SUCESSO!*`;
+        } else {
+          message += `❌ *FALHA AO REDUZIR NA API DO FACEBOOK.*`;
         }
-      };
-
-      await bot.sendMessage(chatId, message, opts);
-      console.log(`📨 Sugestão enviada para "${item.nome}": ${item.tagAcao}`);
+        
+        await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+        console.log(`🤖 Redução automática aplicada na campanha "${item.nome}"`);
+      }
     }
   } finally {
     try { await mcpClient.close(); } catch (e) { /* ignorar */ }
@@ -393,6 +456,14 @@ async function runCampaignCheck() {
 }
 
 // ========== COMANDOS DO TELEGRAM ==========
+
+bot.onText(/\/analisar/, async (msg) => {
+  const chatIdMsg = msg.chat.id;
+  if (chatIdMsg.toString() !== chatId.toString()) return;
+  
+  await bot.sendMessage(chatIdMsg, "⏳ Rodando análise instantânea das campanhas no Facebook Ads...");
+  await runCampaignCheck(true);
+});
 
 bot.onText(/\/reset/, async (msg) => {
   const chatIdMsg = msg.chat.id;
@@ -545,15 +616,24 @@ bot.onText(/\/resumo/, async (msg) => {
 
     let totalRevenue = sumCampaignsRevenue;
     let totalSales = sumCampaignsSales;
+    let pendingSales = 0;
 
     if (summaryRes) {
        // Puxamos faturamento e vendas da Utmify (para incluir as não rastreadas)
        const dashRevenue = (summaryRes.revenue || 0) / 100;
-       const dashSales = (summaryRes.ordersCount && summaryRes.ordersCount.total) ? summaryRes.ordersCount.total : 0;
        
-       // Só substitui se o dashboard tiver um valor maior (para garantir que não zere caso a Utmify atrase)
+       // Importante: usar apenas vendas APROVADAS (approved ou paid) para não misturar com boletos pendentes!
+       let dashApprovedSales = sumCampaignsSales;
+       if (summaryRes.ordersCount) {
+         dashApprovedSales = summaryRes.ordersCount.approved !== undefined ? summaryRes.ordersCount.approved : 
+                            (summaryRes.ordersCount.paid !== undefined ? summaryRes.ordersCount.paid : summaryRes.ordersCount.total);
+         
+         pendingSales = summaryRes.ordersCount.pending || summaryRes.ordersCount.waitingPayment || 0;
+       }
+       
+       // Só substitui se o dashboard tiver um valor maior
        if (dashRevenue >= sumCampaignsRevenue) totalRevenue = dashRevenue;
-       if (dashSales >= sumCampaignsSales) totalSales = dashSales;
+       if (dashApprovedSales >= sumCampaignsSales) totalSales = dashApprovedSales;
     }
     
     if (campaigns.length === 0 && totalSales === 0) {
@@ -585,9 +665,12 @@ bot.onText(/\/resumo/, async (msg) => {
     const untrackedSales = totalSales - sumCampaignsSales;
 
     summaryText += `🏆 *TOTAL GERAL*\n`;
-    summaryText += `Vendas Totais: ${totalSales}\n`;
+    summaryText += `Vendas Aprovadas: ${totalSales}\n`;
     if (untrackedSales > 0) {
       summaryText += `👻 Vendas Não Rastreadas: ${untrackedSales}\n`;
+    }
+    if (pendingSales > 0) {
+      summaryText += `⏳ Vendas Pendentes (Pix/Boleto): ${pendingSales}\n`;
     }
     summaryText += `Gasto Total: $${totalSpend.toFixed(2)}\n`;
     summaryText += `Faturamento Total: $${totalRevenue.toFixed(2)}\n`;
@@ -655,23 +738,46 @@ cron.schedule('55 23 * * *', async () => {
     const dashboardId = await getDashboardId(mcpClient);
     if (!dashboardId) return;
 
-    const campaigns = await getCampaignData(mcpClient, dashboardId);
+    // Buscar campanhas de hoje para ajustar orçamentos (como antes)
+    const campaignsToday = await getCampaignData(mcpClient, dashboardId, 0);
+    // Buscar campanhas dos ÚLTIMOS 2 DIAS para regra de Pausa
+    const campaigns2Days = await getCampaignData(mcpClient, dashboardId, -1, 0);
+
     const report = [];
     let errorCount = 0;
 
-    for (const c of campaigns) {
-      const roas = c.roas || 0;
+    // Criar um mapa do ROAS dos últimos 2 dias para fácil acesso
+    const roas2DaysMap = {};
+    for (const c of campaigns2Days) {
+      roas2DaysMap[c.id] = c.roas || 0;
+    }
+
+    for (const c of campaignsToday) {
+      const roasToday = c.roas || 0;
       const spendUSD = (c.spend || 0) / 100;
       const sales = c.approvedOrdersCount || 0;
+      const roas2Days = roas2DaysMap[c.id] !== undefined ? roas2DaysMap[c.id] : roasToday;
       let targetBudgetCents = c.dailyBudget || 1000;
 
-      // Regra de tolerância: não julgar se gastou muito pouco
-      if (sales === 0 && spendUSD < 8.00) continue;
-      if (sales > 0 && roas < 1.3 && spendUSD < 12.00) continue;
+      // Se a campanha esteve com ROAS < 1.3 na janela dos últimos 2 dias somados, PAUSA ELA
+      if (roas2Days < 1.3 && spendUSD >= 5.00) {
+        const success = await updateCampaignStatus(c.id, 'PAUSED');
+        if (success) {
+          report.push(`⏸️ *${c.name}* → PAUSADA (ROAS 2 Dias: ${roas2Days.toFixed(2)})`);
+        } else {
+          errorCount++;
+          report.push(`❌ *FALHOU:* ${c.name} (Erro na API do Facebook ao pausar)`);
+        }
+        continue; // Pula o ajuste de orçamento já que foi pausada
+      }
 
-      if (roas > 1.8) {
+      // Regra de tolerância: não julgar se gastou muito pouco hoje
+      if (sales === 0 && spendUSD < 8.00) continue;
+      if (sales > 0 && roasToday < 1.3 && spendUSD < 12.00) continue;
+
+      if (roasToday > 1.8) {
         targetBudgetCents = Math.min(targetBudgetCents, 3000); // Max $30
-      } else if (roas >= 1.3) {
+      } else if (roasToday >= 1.3) {
         targetBudgetCents = 2000; // $20
       } else {
         targetBudgetCents = 1000; // $10
@@ -680,7 +786,7 @@ cron.schedule('55 23 * * *', async () => {
       if (targetBudgetCents !== c.dailyBudget) {
         const success = await updateCampaignBudget(c.id, targetBudgetCents);
         if (success) {
-          report.push(`🔄 *${c.name}* → $${(targetBudgetCents / 100).toFixed(2)} (ROAS: ${roas.toFixed(2)})`);
+          report.push(`🔄 *${c.name}* → $${(targetBudgetCents / 100).toFixed(2)} (ROAS Hoje: ${roasToday.toFixed(2)})`);
         } else {
           errorCount++;
           report.push(`❌ *FALHOU:* ${c.name} (Erro na API do Facebook)`);
@@ -707,16 +813,64 @@ cron.schedule('55 23 * * *', async () => {
 }, { timezone: "America/Sao_Paulo" });
 
 // ========== AGENDAMENTO INTELIGENTE (HORÁRIO DE BRASÍLIA) ==========
-// 08:00 às 16:00 -> A cada 2 horas (08:00, 10:00, 12:00, 14:00, 16:00)
-// 18:00 às 22:00 -> A cada 1 hora (18:00, 19:00, 20:00, 21:00, 22:00) para defesa rápida
-cron.schedule('0 8-16/2,18-22 * * *', () => {
+// Roda toda hora cravada das 08h até as 22h
+cron.schedule('0 8-22 * * *', () => {
   runCampaignCheck();
 }, { timezone: "America/Sao_Paulo" });
+
+// ========== LISTENER DOS BOTÕES (APROVAÇÃO MANUAL) ==========
+bot.on('callback_query', async (query) => {
+  const chatIdMsg = query.message.chat.id;
+  if (chatIdMsg.toString() !== chatId.toString()) return;
+
+  const data = query.data;
+
+  if (data.startsWith('approve_')) {
+    const parts = data.split('_');
+    const campaignId = parts[1];
+    const newBudgetCents = parseInt(parts[2], 10);
+    const approvedSales = parseInt(parts[3], 10);
+    const profitUSD = parseFloat(parts[4]);
+
+    await bot.answerCallbackQuery(query.id, { text: '🔄 Aplicando na API do Facebook...' });
+    const success = await updateCampaignBudget(campaignId, newBudgetCents);
+
+    if (success) {
+      // Registrar no histórico em memória
+      historyLogs[campaignId] = {
+        lastChangeTimeStr: formatTimeSP(),
+        timestamp: Date.now(),
+        salesAtChange: approvedSales,
+        profitAtChange: profitUSD,
+        budgetCents: newBudgetCents
+      };
+
+      await bot.editMessageText(query.message.text + '\n\n✅ *ALTERAÇÃO APROVADA E APLICADA COM SUCESSO NO FACEBOOK!*', {
+        chat_id: chatIdMsg,
+        message_id: query.message.message_id,
+        parse_mode: 'Markdown'
+      });
+    } else {
+      await bot.editMessageText(query.message.text + '\n\n❌ *FALHA AO APLICAR NA API DO FACEBOOK.* Verifique o Token.', {
+        chat_id: chatIdMsg,
+        message_id: query.message.message_id,
+        parse_mode: 'Markdown'
+      });
+    }
+  } else if (data.startsWith('reject_')) {
+    await bot.answerCallbackQuery(query.id, { text: '❌ Ação ignorada.' });
+    await bot.editMessageText(query.message.text + '\n\n🚫 *AÇÃO RECUSADA PELO USUÁRIO.* Orçamento mantido.', {
+        chat_id: chatIdMsg,
+        message_id: query.message.message_id,
+        parse_mode: 'Markdown'
+    });
+  }
+});
 
 console.log("🤖 Robô Gestor AI ativo!");
 console.log("   📖 Leitura: Utmify MCP (vendas reais via checkout)");
 console.log("   ✏️ Escrita: Facebook Ads API (alteração de orçamento)");
-console.log("   ⏰ Verificação: 2h de dia (08h-16h) e 1h à noite (18h-22h).");
+console.log("   ⏰ Verificação: A cada 1 hora (08h às 22h). Campanhas alteradas ganham 2h de respiro.");
 console.log("   🔒 Trava de Escala: Aumentos de +50% suspensos após 19:00.");
 console.log("   🛡️ Reset noturno: 23:55 (Horário de Brasília).");
 console.log("");
