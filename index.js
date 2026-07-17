@@ -424,11 +424,11 @@ bot.onText(/\/resumo/, async (msg) => {
     let summaryText = "📊 *RESUMO DAS CAMPANHAS HOJE*\n\n";
 
     for (const c of campaigns) {
-      const spend = c.spend || 0;
-      const revenue = c.revenue || 0;
+      const spend = (c.spend || 0) / 100;
+      const revenue = (c.revenue || 0) / 100;
       const profit = revenue - spend;
-      const roas = c.roas || 0;
-      const sales = c.purchases || 0;
+      const roas = c.roas || (spend > 0 ? revenue / spend : 0);
+      const sales = c.approvedOrdersCount || 0;
 
       totalSpend += spend;
       totalRevenue += revenue;
