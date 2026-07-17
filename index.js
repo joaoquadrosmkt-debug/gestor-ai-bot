@@ -245,7 +245,8 @@ function evaluateLocalRules(campaignsData, hourlyHistory = { profitByHour: {}, s
     const history = historyLogs[c.id];
     if (history) {
       const hoursSince = (Date.now() - history.timestamp) / (1000 * 60 * 60);
-      if (hoursSince < 2) {
+      // Tolerância de 15 minutos (0.25h) para não perder a janela se o usuário demorou a aprovar (ex: 14:10)
+      if (hoursSince < 1.75) {
         console.log(`⏳ Campanha "${c.name}" ignorada (em período de respiro. Alterada há ${hoursSince.toFixed(1)}h).`);
         continue;
       }
@@ -261,7 +262,7 @@ function evaluateLocalRules(campaignsData, hourlyHistory = { profitByHour: {}, s
 
     // Regra Pós-Escala: Se o bot aumentou o orçamento nas últimas horas, verificar se a performance despencou
     let handledPostScale = false;
-    if (history && history.action === 'Aumentar' && hoursSince >= 2) {
+    if (history && history.action === 'Aumentar' && hoursSince >= 1.75) {
       const newProfit = profitUSD - (history.profitAtChange || 0);
       if (roas < 1.3 || (newProfit < 0 && spendUSD >= 10.00)) {
         acaoSugerida = "Reduzir 30%";
@@ -283,16 +284,22 @@ function evaluateLocalRules(campaignsData, hourlyHistory = { profitByHour: {}, s
             const newSales = approvedSales - (history.salesAtChange || 0);
             const newProfit = profitUSD - (history.profitAtChange || 0);
             if (newSales >= 3) {
-              acaoSugerida = "Aumentar 50%";
-              tagAcao = "+50%";
-              newBudgetCents = Math.round(currentBudgetCents * 1.5);
-              motivo = `escala consecutiva${peakExtraText}: aumento sugerido pois desde a ultima atualização às ${history.lastChangeTimeStr} teve ${newSales} vendas novas e lucro de $${newProfit.toFixed(2)}`;
+              const proposedBudgetCents = Math.min(Math.round(currentBudgetCents * 1.5), 20000); // Teto máximo de $200.00
+              if (proposedBudgetCents > currentBudgetCents) {
+                acaoSugerida = "Aumentar 50%";
+                tagAcao = "+50%";
+                newBudgetCents = proposedBudgetCents;
+                motivo = `escala consecutiva${peakExtraText}: aumento sugerido pois desde a ultima atualização às ${history.lastChangeTimeStr} teve ${newSales} vendas novas e lucro de $${newProfit.toFixed(2)}`;
+              }
             }
           } else {
-            acaoSugerida = "Aumentar 50%";
-            tagAcao = "+50%";
-            newBudgetCents = Math.round(currentBudgetCents * 1.5);
-            motivo = `escala inicial${peakExtraText}: +${approvedSales} vendas e +$${profitUSD.toFixed(2)} de lucro hoje`;
+            const proposedBudgetCents = Math.min(Math.round(currentBudgetCents * 1.5), 20000); // Teto máximo de $200.00
+            if (proposedBudgetCents > currentBudgetCents) {
+              acaoSugerida = "Aumentar 50%";
+              tagAcao = "+50%";
+              newBudgetCents = proposedBudgetCents;
+              motivo = `escala inicial${peakExtraText}: +${approvedSales} vendas e +$${profitUSD.toFixed(2)} de lucro hoje`;
+            }
           }
         }
       }
@@ -857,8 +864,8 @@ cron.schedule('55 23 * * *', async () => {
   } finally {
     try { await mcpClient.close(); } catch (e) { /* ignorar */ }
   }
-
   Object.keys(historyLogs).forEach(k => delete historyLogs[k]);
+  saveHistory();
 }, { timezone: "America/Sao_Paulo" });
 
 // ========== AGENDAMENTO INTELIGENTE (HORÁRIO DE BRASÍLIA) ==========
@@ -867,54 +874,6 @@ cron.schedule('0 8-22 * * *', () => {
   runCampaignCheck();
 }, { timezone: "America/Sao_Paulo" });
 
-// ========== LISTENER DOS BOTÕES (APROVAÇÃO MANUAL) ==========
-bot.on('callback_query', async (query) => {
-  const chatIdMsg = query.message.chat.id;
-  if (chatIdMsg.toString() !== chatId.toString()) return;
-
-  const data = query.data;
-
-  if (data.startsWith('approve_')) {
-    const parts = data.split('_');
-    const campaignId = parts[1];
-    const newBudgetCents = parseInt(parts[2], 10);
-    const approvedSales = parseInt(parts[3], 10);
-    const profitUSD = parseFloat(parts[4]);
-
-    await bot.answerCallbackQuery(query.id, { text: '🔄 Aplicando na API do Facebook...' });
-    const success = await updateCampaignBudget(campaignId, newBudgetCents);
-
-    if (success) {
-      // Registrar no histórico em memória
-      historyLogs[campaignId] = {
-        lastChangeTimeStr: formatTimeSP(),
-        timestamp: Date.now(),
-        salesAtChange: approvedSales,
-        profitAtChange: profitUSD,
-        budgetCents: newBudgetCents
-      };
-
-      await bot.editMessageText(query.message.text + '\n\n✅ *ALTERAÇÃO APROVADA E APLICADA COM SUCESSO NO FACEBOOK!*', {
-        chat_id: chatIdMsg,
-        message_id: query.message.message_id,
-        parse_mode: 'Markdown'
-      });
-    } else {
-      await bot.editMessageText(query.message.text + '\n\n❌ *FALHA AO APLICAR NA API DO FACEBOOK.* Verifique o Token.', {
-        chat_id: chatIdMsg,
-        message_id: query.message.message_id,
-        parse_mode: 'Markdown'
-      });
-    }
-  } else if (data.startsWith('reject_')) {
-    await bot.answerCallbackQuery(query.id, { text: '❌ Ação ignorada.' });
-    await bot.editMessageText(query.message.text + '\n\n🚫 *AÇÃO RECUSADA PELO USUÁRIO.* Orçamento mantido.', {
-        chat_id: chatIdMsg,
-        message_id: query.message.message_id,
-        parse_mode: 'Markdown'
-    });
-  }
-});
 
 console.log("🤖 Robô Gestor AI ativo!");
 console.log("   📖 Leitura: Utmify MCP (vendas reais via checkout)");
