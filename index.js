@@ -684,6 +684,22 @@ bot.onText(/\/resumo/, async (msg) => {
   }
 });
 
+bot.onText(/\/status/, async (msg) => {
+  const chatIdMsg = msg.chat.id;
+  if (chatIdMsg.toString() !== chatId.toString()) return;
+
+  const now = new Date();
+  const nextHour = new Date(now);
+  nextHour.setHours(now.getHours() + 1, 0, 0, 0);
+  
+  let msgStatus = `🤖 *Status do Gestor AI*\n\n`;
+  msgStatus += `🕒 *Próxima análise:* ${nextHour.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: "2-digit", minute: "2-digit" })}\n\n`;
+  msgStatus += `ℹ️ *Por que não recebi mensagens há mais de uma hora?*\n`;
+  msgStatus += `O robô roda silenciosamente a cada hora cheia (das 08h às 22h). Ele **só envia mensagem** se alguma campanha precisar de alteração (Escala ou Stop Loss/Redução). Se nenhuma regra for atingida, ele simplesmente mantém os orçamentos e não envia notificações para evitar spam.`;
+
+  await bot.sendMessage(chatIdMsg, msgStatus, { parse_mode: 'Markdown' });
+});
+
 // ========== TELEGRAM CALLBACKS ==========
 
 bot.on('callback_query', async (callbackQuery) => {
