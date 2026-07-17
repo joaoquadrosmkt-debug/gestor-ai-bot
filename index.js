@@ -117,8 +117,8 @@ async function getDashboardId(client) {
   return dashboard.id;
 }
 
-function getBrasiliaDateRange() {
-  const now = new Date();
+function getBrasiliaDateRange(offsetDays = 0) {
+  const now = new Date(new Date().getTime() + offsetDays * 24 * 60 * 60 * 1000);
   const spDateStr = now.toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" });
   
   const fromISO = `${spDateStr}T03:00:00.000Z`;
@@ -129,8 +129,8 @@ function getBrasiliaDateRange() {
   return { from: fromISO, to: toISO };
 }
 
-async function getCampaignData(client, dashboardId) {
-  const dateRange = getBrasiliaDateRange();
+async function getCampaignData(client, dashboardId, offsetDays = 0) {
+  const dateRange = getBrasiliaDateRange(offsetDays);
   console.log(`🔍 Buscando dados Meta Ads (${dateRange.from} até ${dateRange.to})...`);
 
   const data = await callMcpTool(client, 'get_meta_ad_objects', {
@@ -436,6 +436,57 @@ bot.onText(/\/reset/, async (msg) => {
       if (errorCount > 0) msgRet += `\n\n⚠️ Tivemos ${errorCount} erro(s) de permissão com o Facebook. Verifique o Token!`;
     } else {
       msgRet = `🛡️ *Proteção Noturna MANUAL:* Nenhuma campanha precisou de reajuste.`;
+    }
+
+    await bot.sendMessage(chatIdMsg, msgRet, { parse_mode: 'Markdown' });
+  } finally {
+    try { await mcpClient.close(); } catch (e) { /* ignorar */ }
+  }
+});
+
+bot.onText(/\/resetontem/, async (msg) => {
+  const chatIdMsg = msg.chat.id;
+  if (chatIdMsg.toString() !== chatId.toString()) return;
+
+  await bot.sendMessage(chatIdMsg, "⏳ Forçando Proteção Noturna (COM OS DADOS DE ONTEM)...");
+  
+  const mcpClient = await connectUtmifyMcp();
+  if (!mcpClient) return;
+
+  try {
+    const dashboardId = await getDashboardId(mcpClient);
+    if (!dashboardId) return;
+
+    // Passar offsetDays = -1 para pegar ontem
+    const campaigns = await getCampaignData(mcpClient, dashboardId, -1);
+    const report = [];
+    let errorCount = 0;
+
+    for (const c of campaigns) {
+      const roas = c.roas || 0;
+      let targetBudgetCents = c.dailyBudget || 1000;
+
+      if (roas > 1.8) targetBudgetCents = Math.min(targetBudgetCents, 3000);
+      else if (roas >= 1.3) targetBudgetCents = 2000;
+      else targetBudgetCents = 1000;
+
+      if (targetBudgetCents !== c.dailyBudget) {
+        const success = await updateCampaignBudget(c.id, targetBudgetCents);
+        if (success) {
+          report.push(`🔄 *${c.name}* → $${(targetBudgetCents / 100).toFixed(2)} (ROAS: ${roas.toFixed(2)})`);
+        } else {
+          errorCount++;
+          report.push(`❌ *FALHOU:* ${c.name} (Erro na API do Facebook)`);
+        }
+      }
+    }
+
+    let msgRet = "";
+    if (report.length > 0) {
+      msgRet = `🛡️ *Proteção Noturna MANUAL (Dados de Ontem)*\n\n${report.join('\n')}`;
+      if (errorCount > 0) msgRet += `\n\n⚠️ Tivemos ${errorCount} erro(s) de permissão com o Facebook. Verifique o Token!`;
+    } else {
+      msgRet = `🛡️ *Proteção Noturna MANUAL (Ontem):* Nenhuma campanha precisou de reajuste.`;
     }
 
     await bot.sendMessage(chatIdMsg, msgRet, { parse_mode: 'Markdown' });
