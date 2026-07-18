@@ -776,10 +776,10 @@ bot.on('callback_query', async (callbackQuery) => {
   }
 });
 
-// ========== RESET NOTURNO (23:55 Brasília) ==========
+// ========== RESET NOTURNO (23:58 Brasília) ==========
 
-cron.schedule('55 23 * * *', async () => {
-  console.log("\n🛡️ ====== PROTEÇÃO NOTURNA (23:55 BRASÍLIA) ======");
+cron.schedule('58 23 * * *', async () => {
+  console.log("\n🛡️ ====== PROTEÇÃO NOTURNA (23:58 BRASÍLIA) ======");
 
   const mcpClient = await connectUtmifyMcp();
   if (!mcpClient) return;
