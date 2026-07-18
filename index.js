@@ -79,12 +79,12 @@ Analise os dados de cada CAMPANHA (level="campaign") no dia de hoje e sugira alt
    - Ação: "Aumentar 50%".
 
 3. STOP LOSS SEGURO (Campanhas ruins sem vendas):
-   - Gasto hoje (spend/100) >= $8.00 E 0 vendas aprovadas (approvedOrdersCount == 0).
+   - Gasto hoje (spend/100) >= $6.50 E 0 vendas aprovadas (approvedOrdersCount == 0).
    - Ação: "Reduzir 50%".
 
 4. AJUSTE DE ROAS BAIXO (Campanhas com vendas ruins):
    - Campanha tem vendas aprovadas (pelo menos 1), mas o ROAS está < 1.3.
-   - Gasto acumulado hoje (spend/100) de pelo menos $12.00.
+   - Gasto acumulado hoje (spend/100) de pelo menos $8.50.
    - Ação: "Reduzir 30%".
 
 Se nenhuma dessas regras for atendida, recomende "Manter".
@@ -278,8 +278,37 @@ function evaluateLocalRules(campaignsData, hourlyHistory = { profitByHour: {}, s
     }
 
     if (!handledPostScale) {
+      // 0: Super Escala (Aumentar 100%) -> Mínimo 5 vendas e ROAS >= 2.5
+      if (approvedSales >= 5 && roas >= 2.5) {
+        if (nowSPHour >= 19) {
+          console.log(`ℹ️ Campanha "${c.name}" elegível para SUPER ESCALA, porém suspensa por trava noturna (após 19:00).`);
+        } else {
+          const peakExtraText = isPeakHistoricalHour ? " (janela de pico)" : "";
+          if (history) {
+            const newSales = approvedSales - (history.salesAtChange || 0);
+            const newProfit = profitUSD - (history.profitAtChange || 0);
+            if (newSales >= 5) {
+              const proposedBudgetCents = Math.min(Math.round(currentBudgetCents * 2.0), 20000);
+              if (proposedBudgetCents > currentBudgetCents) {
+                acaoSugerida = "Aumentar 100%";
+                tagAcao = "🔥 SUPER ESCALA";
+                newBudgetCents = proposedBudgetCents;
+                motivo = `super escala consecutiva${peakExtraText}: aumento sugerido pois desde a ultima atualização teve ${newSales} vendas novas e lucro de $${newProfit.toFixed(2)}`;
+              }
+            }
+          } else {
+            const proposedBudgetCents = Math.min(Math.round(currentBudgetCents * 2.0), 20000);
+            if (proposedBudgetCents > currentBudgetCents) {
+              acaoSugerida = "Aumentar 100%";
+              tagAcao = "🔥 SUPER ESCALA";
+              newBudgetCents = proposedBudgetCents;
+              motivo = `super escala inicial${peakExtraText}: +${approvedSales} vendas e +$${profitUSD.toFixed(2)} de lucro hoje`;
+            }
+          }
+        }
+      }
       // 1 e 2: Escala (Aumentar 50%) -> Mínimo 3 vendas e ROAS >= 1.8 (Permitido somente até as 19:00)
-      if (approvedSales >= 3 && roas >= 1.8) {
+      else if (approvedSales >= 3 && roas >= 1.8) {
         if (nowSPHour >= 19) {
           console.log(`ℹ️ Campanha "${c.name}" elegível para escala, porém suspensa por trava noturna (após 19:00).`);
         } else {
@@ -307,25 +336,54 @@ function evaluateLocalRules(campaignsData, hourlyHistory = { profitByHour: {}, s
           }
         }
       }
-      // 3: Stop Loss (Reduzir 50%) -> Gasto >= $8.00 e 0 Vendas
-      else if (spendUSD >= 8.00 && approvedSales === 0) {
-        if (isWeakHistoricalHour && spendUSD < 12.00) {
-          console.log(`🛡️ Tolerância de Horário Histórico: Campanha "${c.name}" gastou $${spendUSD.toFixed(2)} às ${nowSPHour}:00h (horário historicamente fraco), aguardando recuperação no pico.`);
+      // ==========================================
+      // PACING (TOLERÂNCIA POR HORA)
+      // ==========================================
+      else {
+        let stopLossLimitUSD;
+        let roasBaixoLimitUSD;
+
+        if (nowSPHour < 14) {
+          stopLossLimitUSD = 10.00; 
+          roasBaixoLimitUSD = 15.00; 
+        } else if (nowSPHour >= 14 && nowSPHour < 18) {
+          stopLossLimitUSD = 8.00;
+          roasBaixoLimitUSD = 11.00;
         } else {
-          acaoSugerida = "Reduzir 50%";
-          tagAcao = "-50%";
-          newBudgetCents = Math.round(currentBudgetCents * 0.5);
-          motivo = `stop loss: $${spendUSD.toFixed(2)} gastos sem nenhuma venda hoje`;
+          stopLossLimitUSD = 6.50; 
+          roasBaixoLimitUSD = 8.50; 
+        }
+
+        // ==========================================
+        // REGRA DE RISCO MARGINAL (FINAL DE ORÇAMENTO)
+        // ==========================================
+        const remainingBudgetUSD = currentBudgetUSD - spendUSD;
+        // Se faltam $4.00 ou menos para acabar o orçamento do dia, não vale a pena cortar. 
+        const isBudgetAlmostDone = remainingBudgetUSD <= 4.00;
+
+        // Só aplica cortes se a campanha ainda tiver margem de gasto
+        if (!isBudgetAlmostDone) {
+          
+          // 3: Stop Loss Progressivo
+          if (spendUSD >= stopLossLimitUSD && approvedSales === 0) {
+            acaoSugerida = "Reduzir 50%";
+            tagAcao = "-50%";
+            newBudgetCents = Math.round(currentBudgetCents * 0.5);
+            motivo = `stop loss de horário: $${spendUSD.toFixed(2)} gastos (limite das ${nowSPHour}h: $${stopLossLimitUSD.toFixed(2)}) sem vendas. Orçamento restante: $${remainingBudgetUSD.toFixed(2)}.`;
+          }
+          // 4: Ajuste ROAS Baixo Progressivo
+          else if (approvedSales >= 1 && roas < 1.3 && spendUSD >= roasBaixoLimitUSD) {
+            acaoSugerida = "Reduzir 30%";
+            tagAcao = "-30%";
+            newBudgetCents = Math.round(currentBudgetCents * 0.7);
+            motivo = `roas baixo na fase do dia: ${approvedSales} venda(s) e ROAS ${roas.toFixed(2)} após gastar $${spendUSD.toFixed(2)} (limite era $${roasBaixoLimitUSD.toFixed(2)}).`;
+          }
+          
+        } else if (spendUSD >= stopLossLimitUSD || (roas < 1.3 && spendUSD >= roasBaixoLimitUSD)) {
+           console.log(`🛡️ Risco Marginal: Campanha "${c.name}" está ruim, mas faltam apenas $${remainingBudgetUSD.toFixed(2)} para acabar o orçamento. Deixando rodar.`);
         }
       }
-      // 4: Ajuste ROAS Baixo (Reduzir 30%) -> Tem vendas, ROAS < 1.3 e Gasto >= $12.00
-      else if (approvedSales >= 1 && roas < 1.3 && spendUSD >= 12.00) {
-        acaoSugerida = "Reduzir 30%";
-        tagAcao = "-30%";
-        newBudgetCents = Math.round(currentBudgetCents * 0.7);
-        motivo = `roas baixo: ${approvedSales} venda(s), Faturamento $${revenueUSD.toFixed(2)}, ROAS ${roas.toFixed(2)} < 1.3 e gasto de $${spendUSD.toFixed(2)}`;
-      }
-    }
+    } // Fim do if (!handledPostScale)
 
     if (acaoSugerida !== "Manter") {
       recommendations.push({
@@ -650,8 +708,9 @@ bot.onText(/\/resumo/, async (msg) => {
     let pendingSales = 0;
 
     if (summaryRes) {
-       // Puxamos faturamento e vendas da Utmify (para incluir as não rastreadas)
-       const dashRevenue = (summaryRes.revenue || 0) / 100;
+       // Puxamos faturamento, vendas e gastos globais da Utmify
+       const dashRevenue = (summaryRes.comissions?.net || summaryRes.revenue || 0) / 100;
+       const dashSpend = (summaryRes.ads?.spent || 0) / 100;
        
        // Importante: usar apenas vendas APROVADAS (approved ou paid) para não misturar com boletos pendentes!
        let dashApprovedSales = sumCampaignsSales;
@@ -665,6 +724,7 @@ bot.onText(/\/resumo/, async (msg) => {
        // Só substitui se o dashboard tiver um valor maior
        if (dashRevenue >= sumCampaignsRevenue) totalRevenue = dashRevenue;
        if (dashApprovedSales >= sumCampaignsSales) totalSales = dashApprovedSales;
+       if (dashSpend >= totalSpend) totalSpend = dashSpend;
     }
     
     if (campaigns.length === 0 && totalSales === 0) {
@@ -817,20 +877,25 @@ cron.schedule('58 23 * * *', async () => {
       }
 
       // Se a campanha esteve com ROAS < 1.3 na janela dos últimos 2 dias somados, PAUSA ELA
-      if (roas2Days < 1.3 && spendUSD >= 5.00) {
-        const success = await updateCampaignStatus(c.id, 'PAUSED');
-        if (success) {
-          report.push(`⏸️ *${c.name}* → PAUSADA (ROAS 2 Dias: ${roas2Days.toFixed(2)})`);
+      if (roas2Days < 1.3 && spendUSD >= 6.50) {
+        // Exceção de Recuperação: Se o ROAS de 2 dias for >= 1.0 e o ROAS de HOJE for > 1.3, salva a campanha
+        if (roas2Days >= 1.0 && roasToday > 1.3) {
+          report.push(`🛡️ *${c.name}* → SALVA DA PAUSA (ROAS 2 Dias: ${roas2Days.toFixed(2)}, Hoje: ${roasToday.toFixed(2)})`);
         } else {
-          errorCount++;
-          report.push(`❌ *FALHOU:* ${c.name} (Erro na API do Facebook ao pausar)`);
+          const success = await updateCampaignStatus(c.id, 'PAUSED');
+          if (success) {
+            report.push(`⏸️ *${c.name}* → PAUSADA (ROAS 2 Dias: ${roas2Days.toFixed(2)})`);
+          } else {
+            errorCount++;
+            report.push(`❌ *FALHOU:* ${c.name} (Erro na API do Facebook ao pausar)`);
+          }
+          continue; // Pula o ajuste de orçamento já que foi pausada
         }
-        continue; // Pula o ajuste de orçamento já que foi pausada
       }
 
       // Regra de tolerância: não julgar se gastou muito pouco hoje
-      if (sales === 0 && spendUSD < 8.00) continue;
-      if (sales > 0 && roasToday < 1.3 && spendUSD < 12.00) continue;
+      if (sales === 0 && spendUSD < 6.50) continue;
+      if (sales > 0 && roasToday < 1.3 && spendUSD < 8.50) continue;
 
       // === SOLUÇÃO AUTOMÁTICA: ROAS 2 DIAS ===
       // Protege a campanha de cair o orçamento se a média dos últimos 2 dias estiver excelente, 
@@ -903,8 +968,8 @@ cron.schedule('58 23 * * *', async () => {
 }, { timezone: "America/Sao_Paulo" });
 
 // ========== AGENDAMENTO INTELIGENTE (HORÁRIO DE BRASÍLIA) ==========
-// Roda toda hora cravada das 08h até as 22h
-cron.schedule('0 8-22 * * *', () => {
+// Roda a cada 15 minutos das 08h até as 22h
+cron.schedule('*/15 8-22 * * *', () => {
   runCampaignCheck();
 }, { timezone: "America/Sao_Paulo" });
 
@@ -912,9 +977,9 @@ cron.schedule('0 8-22 * * *', () => {
 console.log("🤖 Robô Gestor AI ativo!");
 console.log("   📖 Leitura: Utmify MCP (vendas reais via checkout)");
 console.log("   ✏️ Escrita: Facebook Ads API (alteração de orçamento)");
-console.log("   ⏰ Verificação: A cada 1 hora (08h às 22h). Campanhas alteradas ganham 2h de respiro.");
+console.log("   ⏰ Verificação: A CADA 15 MINUTOS (08h às 22h). Campanhas alteradas ganham respiro dinâmico (1h a 1h45).");
 console.log("   🔒 Trava de Escala: Aumentos de +50% suspensos após 19:00.");
-console.log("   🛡️ Reset noturno: 23:55 (Horário de Brasília).");
+console.log("   🛡️ Reset noturno: 23:58 (Horário de Brasília).");
 console.log("");
 
 // Rodar verificação inicial
