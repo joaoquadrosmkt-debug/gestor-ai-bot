@@ -242,18 +242,22 @@ function evaluateLocalRules(campaignsData, hourlyHistory = { profitByHour: {}, s
     let newBudgetCents = currentBudgetCents;
     let motivo = "";
 
+    const nowSPHour = parseInt(new Date().toLocaleTimeString("en-US", { timeZone: "America/Sao_Paulo", hour: "2-digit", hour12: false }));
+    const isPrimeTime = nowSPHour >= 18 && nowSPHour < 23;
+    const cooldownLimit = isPrimeTime ? 1.0 : 1.75;
+
+    let hoursSince = 0;
     const history = historyLogs[c.id];
     if (history) {
-      const hoursSince = (Date.now() - history.timestamp) / (1000 * 60 * 60);
-      // Tolerância de 15 minutos (0.25h) para não perder a janela se o usuário demorou a aprovar (ex: 14:10)
-      if (hoursSince < 1.75) {
-        console.log(`⏳ Campanha "${c.name}" ignorada (em período de respiro. Alterada há ${hoursSince.toFixed(1)}h).`);
+      hoursSince = (Date.now() - history.timestamp) / (1000 * 60 * 60);
+      // Tolerância para respiro
+      if (hoursSince < cooldownLimit) {
+        console.log(`⏳ Campanha "${c.name}" ignorada (em período de respiro de ${cooldownLimit}h. Alterada há ${hoursSince.toFixed(1)}h).`);
         continue;
       }
     }
 
     const lastChangeStr = history ? history.lastChangeTimeStr : "Nenhuma hoje";
-    const nowSPHour = parseInt(new Date().toLocaleTimeString("en-US", { timeZone: "America/Sao_Paulo", hour: "2-digit", hour12: false }));
     
     // Lucro histórico de 7 dias para a hora atual
     const histProfitCents = hourlyHistory.profitByHour[nowSPHour] || 0;
@@ -262,7 +266,7 @@ function evaluateLocalRules(campaignsData, hourlyHistory = { profitByHour: {}, s
 
     // Regra Pós-Escala: Se o bot aumentou o orçamento nas últimas horas, verificar se a performance despencou
     let handledPostScale = false;
-    if (history && history.action === 'Aumentar' && hoursSince >= 1.75) {
+    if (history && history.action === 'Aumentar' && hoursSince >= cooldownLimit) {
       const newProfit = profitUSD - (history.profitAtChange || 0);
       if (roas < 1.3 || (newProfit < 0 && spendUSD >= 10.00)) {
         acaoSugerida = "Reduzir 30%";
@@ -445,12 +449,32 @@ async function runCampaignCheck(isManual = false) {
         `Ação sugerida: ${item.acaoSugerida}: $${formattedBudgetAtual} → $${formattedBudgetNovo}\n` +
         `Motivo: ${item.motivo}`;
 
-      const opts = {
-        reply_markup: {
-          inline_keyboard: [[
+      let inline_keyboard = [];
+      if (isScale) {
+        const budget30 = Math.min(Math.round(item.orcamentoAtualCentavos * 1.3), 20000);
+        const budget50 = Math.min(Math.round(item.orcamentoAtualCentavos * 1.5), 20000);
+        const budget100 = Math.min(Math.round(item.orcamentoAtualCentavos * 2.0), 20000);
+        
+        inline_keyboard = [
+          [
+            { text: '✅ +30%', callback_data: `approve_${item.id}_${budget30}_${item.approvedSales}_${item.profitUSD.toFixed(2)}_${actionTag}` },
+            { text: '🚀 +50%', callback_data: `approve_${item.id}_${budget50}_${item.approvedSales}_${item.profitUSD.toFixed(2)}_${actionTag}` },
+            { text: '🔥 +100%', callback_data: `approve_${item.id}_${budget100}_${item.approvedSales}_${item.profitUSD.toFixed(2)}_${actionTag}` }
+          ],
+          [{ text: '❌ Ignorar', callback_data: `reject_${item.id}` }]
+        ];
+      } else {
+        inline_keyboard = [
+          [
             { text: '✅ Aprovar', callback_data: `approve_${item.id}_${item.orcamentoNovoCentavos}_${item.approvedSales}_${item.profitUSD.toFixed(2)}_${actionTag}` },
             { text: '❌ Não', callback_data: `reject_${item.id}` }
-          ]]
+          ]
+        ];
+      }
+
+      const opts = {
+        reply_markup: {
+          inline_keyboard: inline_keyboard
         }
       };
 
